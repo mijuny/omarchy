@@ -1,0 +1,13 @@
+[Unit]
+Description=Sync ASUS/Lenovo mute LEDs to PipeWire state
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/omarchy/bin/omarchy-mute-led-sync
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

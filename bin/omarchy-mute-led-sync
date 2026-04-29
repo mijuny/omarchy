@@ -1,0 +1,58 @@
+#!/bin/bash
+# Sync platform::{micmute,mute} LED brightness to PipeWire mute state.
+# Event-driven via `pactl subscribe`. Idempotent. No-op on systems
+# without these LED files. Logs to journal for debug.
+#
+# Without this, the kernel's audio-micmute / audio-mute LED triggers
+# only flip the LEDs on the corresponding KEY_* press — meaning the
+# LEDs desync from real PipeWire mute state if mute is changed via
+# any other path (volume widget, SwayOSD, app-level mute).
+#
+# Permissions on /sys/class/leds/platform::*/brightness are managed
+# by the udev rule installed by `install/config/mute-led-sync.sh`,
+# which fires reliably on every device-add event including module
+# reloads.
+
+set -u
+
+LED_MIC=/sys/class/leds/platform::micmute/brightness
+LED_SPK=/sys/class/leds/platform::mute/brightness
+TRG_MIC=/sys/class/leds/platform::micmute/trigger
+TRG_SPK=/sys/class/leds/platform::mute/trigger
+
+log() { echo "[mute-led-sync] $*"; }
+
+# Detach kernel triggers so they don't fight us.
+[[ -w "$TRG_MIC" ]] && echo none > "$TRG_MIC" 2>/dev/null && log "trigger=none on micmute" || true
+[[ -w "$TRG_SPK" ]] && echo none > "$TRG_SPK" 2>/dev/null && log "trigger=none on mute" || true
+
+write_if_writable() {
+  local path="$1" val="$2" name="$3"
+  if [[ ! -e "$path" ]]; then return; fi
+  if [[ ! -w "$path" ]]; then
+    log "skip $name=$val (file not writable; check udev rule + group membership)"
+    return
+  fi
+  printf '%s\n' "$val" > "$path" 2>/dev/null
+}
+
+update() {
+  local mic_state=0 spk_state=0
+  pactl get-source-mute @DEFAULT_SOURCE@ 2>/dev/null | grep -q yes && mic_state=1
+  pactl get-sink-mute   @DEFAULT_SINK@   2>/dev/null | grep -q yes && spk_state=1
+  write_if_writable "$LED_MIC" "$mic_state" mic
+  write_if_writable "$LED_SPK" "$spk_state" speaker
+  log "update mic=$mic_state spk=$spk_state"
+}
+
+log "starting"
+update
+
+# stdbuf -oL forces pactl to line-buffer through the pipe — without
+# this, libc's default block buffering when stdout is a pipe holds
+# events back indefinitely.
+exec stdbuf -oL pactl subscribe | while IFS= read -r line; do
+  case "$line" in
+    *"on source"*|*"on sink"*) update ;;
+  esac
+done
